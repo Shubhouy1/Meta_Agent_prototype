@@ -1,0 +1,35 @@
+{
+  "25cf4a0ad3ff": {
+    "pattern_id": "25cf4a0ad3ff",
+    "keywords": [
+      "build",
+      "pdf",
+      "system",
+      "that",
+      "can"
+    ],
+    "embedding": null,
+    "agent_type": "rag",
+    "tools": [
+      "retriever"
+    ],
+    "generation_method": "self_corrected_1",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_used": "2026-05-02T17:50:45.190840"
+  },
+  "dc777c0a63ef": {
+    "pattern_id": "dc777c0a63ef",
+    "keywords": [
+      "build",
+      "chatbot"
+    ],
+    "embedding": null,
+    "agent_type": "chatbot",
+    "tools": [],
+    "generation_method": "self_corrected_1",
+    "success_count": 1,
+    "failure_count": 0,
+    "last_used": "2026-05-02T17:55:26.379107"
+  }
+}
