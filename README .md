@@ -32,7 +32,7 @@ Deployer → Final Agent
 
 ## Installation
 
-    git clone https://github.com/your-username/meta-agent.git
+    git clone https://github.com/your-username/Meta_Agent_prototype.git
     cd meta-agent
     pip install -r requirements.txt
 
