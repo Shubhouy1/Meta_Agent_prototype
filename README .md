@@ -2,10 +2,7 @@
 
 ## Overview
 
-Meta-Agent is an intelligent system that generates complete AI agents
-from natural language instructions. It automates the entire development
-pipeline, including planning, tool selection, code generation,
-validation, and deployment.
+Meta-Agent is an autonomous system that designs, generates, tests, and deploys AI agents from natural language descriptions. Users simply describe the agent they want, and Meta-Agent handles planning, tool selection, code generation, testing, and deployment automatically.
 
 ## Key Features
 
