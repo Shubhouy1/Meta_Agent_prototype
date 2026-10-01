@@ -1,21 +1,21 @@
-# app.py - Complete UI with Document Q&A for RAG Agents
+# app.py - Streamlit UI for MetaAgent.
+#
+# UI only: collects input, shows progress and renders results. All pipeline
+# logic (planning, tool selection, generation, testing, self-correction,
+# deployment) lives in the metaagent package and is reached through
+# metaagent.builds.service.BuildService.
+
+import html
 
 import streamlit as st
-import json
-import time
-import pandas as pd
-import sys
-import os
-import importlib.util
-import tempfile
 
-sys.path.insert(0, os.path.dirname(__file__))
+from metaagent.ai.llm import describe_error
+from metaagent.builds.service import BuildService
+from metaagent.core.config import get_settings
+from metaagent.rag.service import DocumentService
+from metaagent.schemas import BuildEvent, BuildResult, Constraints
 
-from planner import generate_plan
-from TOOL_generator.tool_generator import ToolSelector
-from code_generator.stage_3_code_generator import CodeGenerator
-from Tester_agent.stage_4_tester import Stage4Tester
-from Delpoy_agent.stage_5_deployer import Stage5Deployer
+settings = get_settings()
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -27,27 +27,26 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
+@st.cache_resource
+def get_build_service() -> BuildService:
+    return BuildService(settings)
+
+
 # ─────────────────────────────────────────────
-# SESSION STATE (ADD RAG STATE)
+# SESSION STATE
 # ─────────────────────────────────────────────
 defaults = {
-    "deployment": None,
-    "code_result": None,
-    "test_result": None,
-    "plan": None,
-    "tool_result": None,
-    "agent_built": False,
-    "rag_vectorstore": None,
-    "rag_embeddings": None,
-    "rag_llm": None,
-    "rag_ready": False,
+    "agent_request": "",
+    "build_result": None,
+    "doc_service": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ============================================
-# DESIGN SYSTEM (KEPT EXACTLY AS YOU HAVE)
+# DESIGN SYSTEM (unchanged)
 # ============================================
 
 st.markdown("""
@@ -269,8 +268,8 @@ footer, #MainMenu { display:none!important; }
     box-shadow:none!important;
 }
 
-/* ── BUILD BUTTON (primary) ── */
-.primary-btn .stButton > button {
+/* ── BUILD BUTTON (primary): st.button(type="primary") ── */
+.stButton > button[kind="primary"] {
     background:var(--ac)!important;
     color:#fff!important;
     border-color:var(--ac)!important;
@@ -278,7 +277,7 @@ footer, #MainMenu { display:none!important; }
     letter-spacing:0.16em!important;
     padding:0.8rem 2rem!important;
 }
-.primary-btn .stButton > button:hover {
+.stButton > button[kind="primary"]:hover {
     background:var(--ac-hover)!important;
     border-color:var(--ac-hover)!important;
     color:#fff!important;
@@ -569,6 +568,12 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
+
+def esc(text) -> str:
+    """Escape model/agent output before it goes inside our HTML wrappers."""
+    return html.escape(str(text)).replace("\n", "<br>")
+
+
 # ─────────────────────────────────────────────
 # HERO
 # ─────────────────────────────────────────────
@@ -596,22 +601,22 @@ st.markdown("""
     <div class="feat-cell">
         <div class="feat-num">02</div>
         <div class="feat-name">Self-Correction</div>
-        <div class="feat-desc">LLM detects and repairs its own errors</div>
+        <div class="feat-desc">Test failures are fed back to the LLM for a retry</div>
     </div>
     <div class="feat-cell">
         <div class="feat-num">03</div>
-        <div class="feat-name">Pattern Learning</div>
-        <div class="feat-desc">Caches and reuses successful patterns</div>
+        <div class="feat-name">Build Cache</div>
+        <div class="feat-desc">Reuses generations that already passed testing</div>
     </div>
     <div class="feat-cell">
         <div class="feat-num">04</div>
         <div class="feat-name">Hybrid Architecture</div>
-        <div class="feat-desc">LLM + prebuilt — the best of both worlds</div>
+        <div class="feat-desc">LLM generation with tested template fallback</div>
     </div>
     <div class="feat-cell">
         <div class="feat-num">05</div>
-        <div class="feat-name">Auto Testing</div>
-        <div class="feat-desc">4-stage validation on every build</div>
+        <div class="feat-name">Gated Testing</div>
+        <div class="feat-desc">Only agents that pass every check are deployed</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -623,462 +628,353 @@ with st.sidebar:
     st.markdown("## Configuration")
     selected_model = st.selectbox(
         "Model",
-        ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"],
-        index=0
+        list(settings.available_models),
+        index=list(settings.available_models).index(settings.default_model),
+        help="Used for planning, tool selection and code generation.",
     )
     st.markdown("---")
     st.markdown("## Constraints")
-    budget      = st.select_slider("Budget",      options=["free","low","medium","high"],       value="free")
-    privacy     = st.select_slider("Privacy",     options=["strict","moderate","none"],         value="moderate")
-    performance = st.select_slider("Performance", options=["fast","balanced","accurate"],       value="balanced")
+    budget      = st.select_slider("Budget",      options=["free", "paid"],                 value="free")
+    privacy     = st.select_slider("Privacy",     options=["strict", "moderate", "none"],   value="moderate")
+    performance = st.select_slider("Performance", options=["fast", "balanced"],             value="balanced")
     st.markdown("---")
-    st.markdown("## Stats")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Patterns",   "12")
-        st.metric("Cache Hits", "8")
-    with c2:
-        st.metric("LLM Success",  "94%")
-        st.metric("Corrections",  "3")
+    st.markdown("## Build history")
+    # Filled at the end of the script so the counts include a build that just ran.
+    stats_slot = st.container()
     st.markdown("---")
     st.caption("Meta-Agent · Nexus")
 
 # ─────────────────────────────────────────────
 # INPUT SECTION
 # ─────────────────────────────────────────────
+QUICK_STARTS = {
+    "PDF QA Agent":     "Build a PDF QA system that answers questions from documents",
+    "Customer Chatbot": "Build a friendly chatbot for customer service",
+    "Web Search Agent": "Build a web search assistant",
+    "Math Calculator":  "Build a calculator that can do basic math",
+}
+
+
+def use_quick_start(text: str) -> None:
+    # on_click callbacks run before the rerun, so the text area shows the new value.
+    st.session_state.agent_request = text
+
+
 st.markdown('<div class="slabel">Build a new agent</div>', unsafe_allow_html=True)
 
 col_in, col_ex = st.columns([3, 1], gap="large")
 
 with col_in:
-    user_input = st.text_area(
+    st.text_area(
         "Describe the agent",
+        key="agent_request",
         placeholder="e.g. Build a PDF QA system that answers questions from uploaded documents…",
         height=128,
+        max_chars=settings.max_request_chars,
         label_visibility="collapsed",
     )
 
 with col_ex:
     st.markdown('<div class="slabel">Quick start</div>', unsafe_allow_html=True)
-    if st.button("PDF QA Agent"):
-        user_input = "Build a PDF QA system that answers questions from documents"
-    if st.button("Customer Chatbot"):
-        user_input = "Build a friendly chatbot for customer service"
-    if st.button("Web Search Agent"):
-        user_input = "Build a web search assistant"
-    if st.button("Math Calculator"):
-        user_input = "Build a calculator that can do basic math"
+    for label, text in QUICK_STARTS.items():
+        st.button(label, key=f"qs_{label}", on_click=use_quick_start, args=(text,))
 
 st.markdown('<div class="sp-md"></div>', unsafe_allow_html=True)
 
 _, col_btn, _ = st.columns([1, 1.1, 1])
 with col_btn:
-    st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
-    build_button = st.button("BUILD AGENT", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    build_button = st.button("BUILD AGENT", type="primary", use_container_width=True)
 
 # ─────────────────────────────────────────────
 # PIPELINE EXECUTION
 # ─────────────────────────────────────────────
-if build_button and user_input:
-    st.session_state.agent_built = False
-    st.markdown("---")
-    st.markdown('<div class="slabel">Pipeline</div>', unsafe_allow_html=True)
+STAGE_PROGRESS = {
+    "planning":       ("Stage 1 / 5 · Planning",        10),
+    "tool_selection": ("Stage 2 / 5 · Tool Selection",  30),
+    "generation":     ("Stage 3 / 5 · Code Generation", 45),
+    "testing":        ("Stage 4 / 5 · Testing",         70),
+    "deployment":     ("Stage 5 / 5 · Deployment",      90),
+}
 
-    progress_bar = st.progress(0)
-    status       = st.empty()
+request_text = st.session_state.agent_request.strip()
 
-    def show_status(msg):
-        status.markdown(f'<div class="status-box">{msg}</div>', unsafe_allow_html=True)
-
-    try:
-        show_status("Stage 1 / 5 &nbsp;·&nbsp; Planning — analyzing your request…")
-        progress_bar.progress(10)
-        time.sleep(0.3)
-
-        plan = generate_plan(user_input)
-        st.session_state.plan = plan
-        progress_bar.progress(20)
-        show_status("Stage 1 complete — agent type identified")
-
-        show_status("Stage 2 / 5 &nbsp;·&nbsp; Tool Selection — running what-if simulation…")
-        selector    = ToolSelector()
-        tool_result = selector.select_tools(plan, user_input, {
-            "budget": budget, "privacy": privacy, "performance": performance
-        })
-        st.session_state.tool_result = tool_result
-        progress_bar.progress(40)
-        show_status("Stage 2 complete — tools selected")
-
-        show_status("Stage 3 / 5 &nbsp;·&nbsp; Code Generation — writing agent code…")
-        generator   = CodeGenerator()
-        code_result = generator.generate(plan, tool_result, user_input)
-        st.session_state.code_result = code_result
-        progress_bar.progress(60)
-        show_status(f"Stage 3 complete — {code_result['lines']} lines generated")
-
-        show_status("Stage 4 / 5 &nbsp;·&nbsp; Testing — validating agent…")
-        tester      = Stage4Tester()
-        test_result = tester.run_tests(code_result["filename"])
-        st.session_state.test_result = test_result
-        progress_bar.progress(80)
-        label = "all tests passed" if test_result["passed"] else "tests passed with warnings"
-        show_status(f"Stage 4 complete — {label}")
-
-        show_status("Stage 5 / 5 &nbsp;·&nbsp; Deployment — packaging agent…")
-        deployer   = Stage5Deployer()
-        deployment = deployer.deploy(
-            tested_file=code_result["filename"],
-            agent_name=plan.get("agent_type", "agent"),
-            create_api=False
-        )
-        st.session_state.deployment = deployment
-        progress_bar.progress(100)
-        show_status("Pipeline complete — agent deployed and ready")
-
-        st.session_state.agent_built = True
-        time.sleep(0.4)
-
-    except Exception as e:
-        st.error(f"Build failed: {str(e)}")
-        progress_bar.empty()
-        status.empty()
-
-# ─────────────────────────────────────────────
-# RESULTS - CONDITIONAL TABS BASED ON AGENT TYPE
-# ─────────────────────────────────────────────
-if st.session_state.agent_built:
-    st.markdown("---")
-    st.markdown('<div class="slabel">Build results</div>', unsafe_allow_html=True)
-
-    agent_type = st.session_state.plan.get("agent_type", "chatbot")
-
-    if agent_type == "rag":
-        # 6 tabs for RAG agents (including Document Q&A)
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Plan", "Simulation", "Code", "Tests", "Deploy", "Document Q&A"])
-
-        # Tab 1: Plan
-        with tab1:
-            if st.session_state.plan:
-                c1, c2, c3, c4 = st.columns(4)
-                with c1: st.metric("Agent Type",     st.session_state.plan.get("agent_type", "—"))
-                with c2: st.metric("Confidence",     f"{st.session_state.plan.get('confidence', 0)*100:.0f}%")
-                with c3: st.metric("Tools Required", len(st.session_state.plan.get("tools", [])))
-                with c4: st.metric("Flow Steps",     len(st.session_state.plan.get("flow",  [])))
-                st.markdown('<div class="sp-md"></div>', unsafe_allow_html=True)
-                st.markdown('<div class="slabel">Execution Flow</div>', unsafe_allow_html=True)
-                for i, step in enumerate(st.session_state.plan.get("flow", []), 1):
-                    st.markdown(f"`{i:02d}` &nbsp; {step}")
-
-        # Tab 2: Simulation
-        with tab2:
-            if st.session_state.tool_result:
-                con = st.session_state.tool_result.get("constraints_applied", {})
-                c1, c2, c3 = st.columns(3)
-                with c1: st.metric("Budget",      con.get("budget",      "—"))
-                with c2: st.metric("Privacy",     con.get("privacy",     "—"))
-                with c3: st.metric("Performance", con.get("performance", "—"))
-                st.markdown('<div class="sp-md"></div>', unsafe_allow_html=True)
-                for tool_name, sim in st.session_state.tool_result.get("what_if_simulations", {}).items():
-                    st.markdown(f'<div class="slabel">{tool_name.upper()} — tool analysis</div>', unsafe_allow_html=True)
-                    rows = [{"Tool": o["name"], "Cost": o["cost"],
-                             "Score": f"{o['score']}/100",
-                             "API Key": "No" if not o.get("api_key_required") else "Yes"}
-                            for o in sim.get("simulated_options", [])]
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                    st.success(f"Recommended: **{sim.get('recommended_name')}**")
-                    st.info(f"Reasoning: {sim.get('reasoning', '')[:300]}…")
-                    st.markdown("---")
-
-        # Tab 3: Code
-        with tab3:
-            if st.session_state.code_result:
-                method = st.session_state.code_result.get("generation_method", "—")
-                c1, c2, c3 = st.columns(3)
-                with c1: st.metric("Lines of Code",   st.session_state.code_result.get("lines", 0))
-                with c2: st.metric("Quality Score",   f"{st.session_state.code_result.get('quality_score', 0)*100:.0f}%")
-                with c3: st.metric("Method",          method)
-                if "self_corrected" in method:
-                    st.success("Self-correction applied — LLM detected and fixed its own errors.")
-                st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
-                st.code(
-                    st.session_state.code_result.get("code", "# No code generated"),
-                    language="python",
-                    line_numbers=True
-                )
-
-        # Tab 4: Tests
-        with tab4:
-            if st.session_state.test_result:
-                if st.session_state.test_result.get("passed"):
-                    st.success("All tests passed.")
-                st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
-                for res in st.session_state.test_result.get("test_results", []):
-                    st.markdown(f"✓ &nbsp; {res}")
-                for warn in st.session_state.test_result.get("warnings", []):
-                    st.warning(warn)
-
-        # Tab 5: Deploy
-        with tab5:
-            dep = st.session_state.deployment
-            if dep and dep.get("success"):
-                st.success("Agent deployed and ready.")
-                c1, c2 = st.columns(2)
-                with c1: st.metric("Deployed File", dep.get("deployed_file", "—"))
-                with c2: st.metric("Status", "Ready")
-                st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
-                st.markdown('<div class="slabel">Run command</div>', unsafe_allow_html=True)
-                st.code(dep.get("run_command", "—"), language="bash")
-                st.markdown("---")
-                st.markdown('<div class="slabel">Live agent test</div>', unsafe_allow_html=True)
-                test_q = st.text_input("Question", key="live_q",
-                                       placeholder="Type a message…",
-                                       label_visibility="collapsed")
-                if st.button("Send", key="send_btn"):
-                    if test_q:
-                        with st.spinner("Running…"):
-                            try:
-                                af = dep.get("deployed_file")
-                                if af and os.path.exists(af):
-                                    spec   = importlib.util.spec_from_file_location("test_agent", af)
-                                    module = importlib.util.module_from_spec(spec)
-                                    spec.loader.exec_module(module)
-                                    resp = module.Agent().run(test_q)
-                                    st.markdown(
-                                        f'<div class="resp-box"><span class="resp-label">Agent response</span>{resp}</div>',
-                                        unsafe_allow_html=True
-                                    )
-                                else:
-                                    st.error(f"File not found: {af}")
-                            except Exception as e:
-                                st.error(f"Error: {e}")
-                    else:
-                        st.warning("Enter a question first.")
-
-        # Tab 6: Document Q&A (RAG only)
-        with tab6:
-            st.markdown('<div class="slabel">Document Upload & Q&A</div>', unsafe_allow_html=True)
-            st.markdown("Upload PDF or TXT documents and ask questions about their content")
-
-            # Initialize RAG components
-            if st.session_state.rag_ready is False:
-                try:
-                    from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-                    from langchain_chroma import Chroma
-
-                    st.session_state.rag_embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
-                    st.session_state.rag_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
-
-                    if os.path.exists("./chroma_db"):
-                        try:
-                            st.session_state.rag_vectorstore = Chroma(
-                                persist_directory="./chroma_db",
-                                embedding_function=st.session_state.rag_embeddings
-                            )
-                            st.session_state.rag_ready = True
-                        except:
-                            st.session_state.rag_vectorstore = None
-                    else:
-                        st.session_state.rag_vectorstore = None
-                except Exception as e:
-                    st.warning(f"RAG components not available: {e}")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("**1. Upload Documents**")
-                uploaded_files = st.file_uploader(
-                    "Choose PDF or TXT files",
-                    type=["pdf", "txt"],
-                    accept_multiple_files=True,
-                    key="rag_uploader",
-                    label_visibility="collapsed"
-                )
-
-                if uploaded_files and st.button("Process Documents", key="process_docs"):
-                    with st.spinner("Processing documents..."):
-                        try:
-                            from langchain_community.document_loaders import PyPDFLoader, TextLoader
-                            from langchain_text_splitters import RecursiveCharacterTextSplitter
-                            from langchain_chroma import Chroma
-
-                            all_docs = []
-                            for uploaded_file in uploaded_files:
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp:
-                                    tmp.write(uploaded_file.getvalue())
-                                    tmp_path = tmp.name
-
-                                if uploaded_file.name.endswith('.pdf'):
-                                    loader = PyPDFLoader(tmp_path)
-                                else:
-                                    loader = TextLoader(tmp_path, encoding='utf-8')
-
-                                docs = loader.load()
-                                all_docs.extend(docs)
-                                os.unlink(tmp_path)
-
-                            if all_docs:
-                                text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-                                chunks = text_splitter.split_documents(all_docs)
-
-                                if st.session_state.rag_vectorstore:
-                                    st.session_state.rag_vectorstore.add_documents(chunks)
-                                    st.session_state.rag_vectorstore.persist()
-                                else:
-                                    st.session_state.rag_vectorstore = Chroma.from_documents(
-                                        documents=chunks,
-                                        embedding=st.session_state.rag_embeddings,
-                                        persist_directory="./chroma_db"
-                                    )
-
-                                st.session_state.rag_ready = True
-                                st.success(f"✅ Processed {len(uploaded_files)} files into {len(chunks)} chunks")
-                                st.rerun()
-                            else:
-                                st.error("No documents could be loaded")
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-
-                if st.session_state.rag_ready and st.session_state.rag_vectorstore:
-                    st.success("✅ Documents ready for questions")
-
-            with col2:
-                st.markdown("**2. Ask Questions**")
-                query = st.text_area("Your question:", placeholder="What is this document about?", key="rag_query", label_visibility="collapsed")
-
-                if st.button("Ask", key="ask_rag") and query:
-                    with st.spinner("Searching for answer..."):
-                        try:
-                            if st.session_state.rag_vectorstore:
-                                docs = st.session_state.rag_vectorstore.similarity_search(query, k=3)
-                                if docs:
-                                    context = "\n\n".join([d.page_content for d in docs])
-                                    prompt = f"Based on the context, answer:\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
-                                    response = st.session_state.rag_llm.invoke(prompt)
-                                    st.markdown(f'<div class="resp-box"><span class="resp-label">Answer</span>{response.content}</div>', unsafe_allow_html=True)
-
-                                    with st.expander("View source documents"):
-                                        for i, doc in enumerate(docs):
-                                            st.write(f"**Source {i+1}:** {doc.page_content[:300]}...")
-                                else:
-                                    st.warning("No relevant information found. Try a different question.")
-                            else:
-                                st.warning("No documents loaded. Please upload files first.")
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-
-    else:
-        # 5 tabs for non-RAG agents
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Plan", "Simulation", "Code", "Tests", "Deploy"])
-
-        # Tab 1: Plan
-        with tab1:
-            if st.session_state.plan:
-                c1, c2, c3, c4 = st.columns(4)
-                with c1: st.metric("Agent Type",     st.session_state.plan.get("agent_type", "—"))
-                with c2: st.metric("Confidence",     f"{st.session_state.plan.get('confidence', 0)*100:.0f}%")
-                with c3: st.metric("Tools Required", len(st.session_state.plan.get("tools", [])))
-                with c4: st.metric("Flow Steps",     len(st.session_state.plan.get("flow",  [])))
-                st.markdown('<div class="sp-md"></div>', unsafe_allow_html=True)
-                st.markdown('<div class="slabel">Execution Flow</div>', unsafe_allow_html=True)
-                for i, step in enumerate(st.session_state.plan.get("flow", []), 1):
-                    st.markdown(f"`{i:02d}` &nbsp; {step}")
-
-        # Tab 2: Simulation
-        with tab2:
-            if st.session_state.tool_result:
-                con = st.session_state.tool_result.get("constraints_applied", {})
-                c1, c2, c3 = st.columns(3)
-                with c1: st.metric("Budget",      con.get("budget",      "—"))
-                with c2: st.metric("Privacy",     con.get("privacy",     "—"))
-                with c3: st.metric("Performance", con.get("performance", "—"))
-                st.markdown('<div class="sp-md"></div>', unsafe_allow_html=True)
-                for tool_name, sim in st.session_state.tool_result.get("what_if_simulations", {}).items():
-                    st.markdown(f'<div class="slabel">{tool_name.upper()} — tool analysis</div>', unsafe_allow_html=True)
-                    rows = [{"Tool": o["name"], "Cost": o["cost"],
-                             "Score": f"{o['score']}/100",
-                             "API Key": "No" if not o.get("api_key_required") else "Yes"}
-                            for o in sim.get("simulated_options", [])]
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                    st.success(f"Recommended: **{sim.get('recommended_name')}**")
-                    st.info(f"Reasoning: {sim.get('reasoning', '')[:300]}…")
-                    st.markdown("---")
-
-        # Tab 3: Code
-        with tab3:
-            if st.session_state.code_result:
-                method = st.session_state.code_result.get("generation_method", "—")
-                c1, c2, c3 = st.columns(3)
-                with c1: st.metric("Lines of Code",   st.session_state.code_result.get("lines", 0))
-                with c2: st.metric("Quality Score",   f"{st.session_state.code_result.get('quality_score', 0)*100:.0f}%")
-                with c3: st.metric("Method",          method)
-                if "self_corrected" in method:
-                    st.success("Self-correction applied — LLM detected and fixed its own errors.")
-                st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
-                st.code(
-                    st.session_state.code_result.get("code", "# No code generated"),
-                    language="python",
-                    line_numbers=True
-                )
-
-        # Tab 4: Tests
-        with tab4:
-            if st.session_state.test_result:
-                if st.session_state.test_result.get("passed"):
-                    st.success("All tests passed.")
-                st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
-                for res in st.session_state.test_result.get("test_results", []):
-                    st.markdown(f"✓ &nbsp; {res}")
-                for warn in st.session_state.test_result.get("warnings", []):
-                    st.warning(warn)
-
-        # Tab 5: Deploy
-        with tab5:
-            dep = st.session_state.deployment
-            if dep and dep.get("success"):
-                st.success("Agent deployed and ready.")
-                c1, c2 = st.columns(2)
-                with c1: st.metric("Deployed File", dep.get("deployed_file", "—"))
-                with c2: st.metric("Status", "Ready")
-                st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
-                st.markdown('<div class="slabel">Run command</div>', unsafe_allow_html=True)
-                st.code(dep.get("run_command", "—"), language="bash")
-                st.markdown("---")
-                st.markdown('<div class="slabel">Live agent test</div>', unsafe_allow_html=True)
-                test_q = st.text_input("Question", key="live_q",
-                                       placeholder="Type a message…",
-                                       label_visibility="collapsed")
-                if st.button("Send", key="send_btn"):
-                    if test_q:
-                        with st.spinner("Running…"):
-                            try:
-                                af = dep.get("deployed_file")
-                                if af and os.path.exists(af):
-                                    spec   = importlib.util.spec_from_file_location("test_agent", af)
-                                    module = importlib.util.module_from_spec(spec)
-                                    spec.loader.exec_module(module)
-                                    resp = module.Agent().run(test_q)
-                                    st.markdown(
-                                        f'<div class="resp-box"><span class="resp-label">Agent response</span>{resp}</div>',
-                                        unsafe_allow_html=True
-                                    )
-                                else:
-                                    st.error(f"File not found: {af}")
-                            except Exception as e:
-                                st.error(f"Error: {e}")
-                    else:
-                        st.warning("Enter a question first.")
-
-    # Show stats
-    if st.session_state.code_result and "stats" in st.session_state.code_result:
-        st.markdown("---")
-        with st.expander("Generator Statistics & Pattern Learning Data"):
-            st.json(st.session_state.code_result["stats"])
-
-elif build_button and not user_input:
+if build_button and not request_text:
     st.warning("Please describe the agent you want to build.")
 
-else:
+elif build_button:
+    st.session_state.build_result = None
+    st.markdown("---")
+    st.markdown('<div class="slabel">Pipeline</div>', unsafe_allow_html=True)
+    progress_bar = st.progress(0)
+    status = st.empty()
+
+    def show_status(msg: str) -> None:
+        status.markdown(f'<div class="status-box">{esc(msg)}</div>', unsafe_allow_html=True)
+
+    def on_event(event: BuildEvent) -> None:
+        label, pct = STAGE_PROGRESS.get(event.stage, (event.stage, None))
+        if pct is not None and event.event in ("started", "completed"):
+            progress_bar.progress(min(100, pct + (10 if event.event == "completed" else 0)))
+        detail = f" — {event.message}" if event.message else ""
+        show_status(f"{label} · {event.event}{detail}")
+
+    show_status("Starting build…")
+    result = get_build_service().start_build(
+        request_text,
+        Constraints(budget=budget, privacy=privacy, performance=performance),
+        selected_model,
+        on_event=on_event,
+    )
+    st.session_state.build_result = result
+    if result.succeeded:
+        progress_bar.progress(100)
+        show_status(f"Pipeline complete — agent deployed ({result.duration_s:.0f}s)")
+    else:
+        show_status(f"Pipeline stopped at {result.failed_stage} ({result.duration_s:.0f}s)")
+
+
+# ─────────────────────────────────────────────
+# RESULT RENDERING
+# ─────────────────────────────────────────────
+def render_plan(result: BuildResult) -> None:
+    pr = result.plan
+    if pr is None:
+        st.info("Planning did not run.")
+        return
+    if not pr.ok:
+        st.error(f"Planning failed: {pr.error.message}")
+        return
+    plan = pr.plan
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("Agent Type",     plan.agent_type)
+    with c2: st.metric("Confidence",     f"{plan.confidence * 100:.0f}%")
+    with c3: st.metric("Tools Required", len(plan.tools))
+    with c4: st.metric("Flow Steps",     len(plan.flow))
+    for w in pr.warnings:
+        st.warning(w)
+    st.markdown('<div class="sp-md"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="slabel">Execution Flow</div>', unsafe_allow_html=True)
+    for i, step in enumerate(plan.flow, 1):
+        st.markdown(f"`{i:02d}` &nbsp; {esc(step)}")
+
+
+def render_simulation(result: BuildResult) -> None:
+    sel = result.tool_selection
+    if sel is None:
+        st.info("Tool selection did not run.")
+        return
+    c1, c2, c3 = st.columns(3)
+    with c1: st.metric("Budget",      sel.constraints.budget)
+    with c2: st.metric("Privacy",     sel.constraints.privacy)
+    with c3: st.metric("Performance", sel.constraints.performance)
+    if not sel.ok:
+        st.error(f"Tool selection failed: {sel.error.message}")
+    for w in sel.warnings:
+        st.warning(w)
+    if not sel.simulations:
+        st.info("This agent needs no tools.")
+        return
+    st.markdown('<div class="sp-md"></div>', unsafe_allow_html=True)
+    for tool_name, sim in sel.simulations.items():
+        st.markdown(f'<div class="slabel">{esc(tool_name.upper())} — tool analysis</div>', unsafe_allow_html=True)
+        rows = [{"Tool": o.name, "Cost": o.cost, "Score": f"{o.score}/100",
+                 "API Key": "Yes" if o.api_key_required else "No",
+                 "Available": "Yes" if o.available else "No"}
+                for o in sim.options]
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        choice = sel.selections.get(tool_name)
+        if choice:
+            st.success(f"Selected: **{choice.name}**" + ("" if choice.was_recommended else " (differs from simulation)"))
+            st.info(f"Reasoning: {choice.reasoning[:300]}")
+        st.markdown("---")
+
+
+def render_code(result: BuildResult) -> None:
+    gen = result.generation
+    if gen is None:
+        st.info("Code generation did not run.")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("Lines of Code",    gen.lines)
+    with c2: st.metric("Quality Score",    f"{gen.quality_score * 100:.0f}%")
+    with c3: st.metric("Method",           gen.method or "—")
+    with c4: st.metric("Self-corrections", gen.corrections)
+    if gen.attempts:
+        st.dataframe(
+            [{"Attempt": a.attempt, "Source": a.method, "Passed": "Yes" if a.passed else "No",
+              "Error": a.error or ""} for a in gen.attempts],
+            use_container_width=True, hide_index=True,
+        )
+    if gen.error and not gen.code:
+        st.error(f"Generation failed: {gen.error.message}")
+    st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
+    st.code(gen.code or "# No code generated", language="python", line_numbers=True)
+
+
+def render_tests(result: BuildResult) -> None:
+    test = result.test
+    if test is None:
+        st.info("Testing did not run.")
+        return
+    if test.passed:
+        st.success("All tests passed.")
+    else:
+        st.error(f"Tests failed: {test.error.message if test.error else 'unknown error'}")
+    st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
+    for check in test.checks:
+        mark = "✓" if check.passed else "✗"
+        st.markdown(f"{mark} &nbsp; **{esc(check.name)}** — {esc(check.message)}")
+    for warn in test.warnings:
+        st.warning(warn)
+    if test.output_preview:
+        st.caption("Sample output (test mode, canned LLM reply)")
+        st.code(test.output_preview, language="text")
+    if test.error and test.error.detail:
+        with st.expander("Failure details"):
+            st.code(test.error.detail, language="text")
+
+
+def render_deploy(result: BuildResult) -> None:
+    dep = result.deployment
+    if not result.deployed:
+        reason = result.error.message if result.error else "unknown reason"
+        st.error(f"Not deployed — the build stopped at **{result.failed_stage or 'an earlier stage'}**: {reason}")
+        if dep is not None and dep.error:
+            st.error(f"Deployment error: {dep.error.message}")
+        return
+
+    st.success("Agent deployed and ready.")
+    c1, c2 = st.columns(2)
+    with c1: st.metric("Deployment", dep.deployment_id)
+    with c2: st.metric("Status", "Ready")
+    st.markdown('<div class="sp-sm"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="slabel">Run command</div>', unsafe_allow_html=True)
+    st.code(dep.run_command, language="bash")
+    st.markdown("---")
+    st.markdown('<div class="slabel">Live agent test</div>', unsafe_allow_html=True)
+    st.caption("Runs the deployed agent once in a separate process. Model calls are made by "
+               "MetaAgent on the agent's behalf; the agent never receives your API key.")
+    test_q = st.text_input("Question", key="live_q", placeholder="Type a message…",
+                           label_visibility="collapsed")
+    if st.button("Send", key="send_btn"):
+        if not test_q:
+            st.warning("Enter a question first.")
+            return
+        with st.spinner("Running…"):
+            try:
+                run = get_build_service().run_deployed_agent(result, test_q)
+            except Exception as e:
+                st.error(f"Error: {describe_error(e)}")
+                return
+        for problem in dict.fromkeys(run.proxy_errors):
+            st.warning(f"A model call made for the agent failed: {problem}")
+        if run.ok:
+            st.markdown(f'<div class="resp-box"><span class="resp-label">Agent response</span>'
+                        f'{esc(run.output)}</div>', unsafe_allow_html=True)
+            st.caption(f"{run.duration_s:.1f}s · {run.llm_calls} model call(s)")
+        else:
+            st.error(f"Agent run failed: {run.error_type or ''} {run.error or ''}".strip())
+            if run.traceback:
+                with st.expander("Traceback"):
+                    st.code(run.traceback, language="text")
+
+
+def get_doc_service() -> DocumentService:
+    if st.session_state.doc_service is None:
+        st.session_state.doc_service = DocumentService(settings)
+    return st.session_state.doc_service
+
+
+def render_doc_qa(_result: BuildResult) -> None:
+    st.markdown('<div class="slabel">Document Upload & Q&A</div>', unsafe_allow_html=True)
+    st.markdown(f"Upload PDF or TXT documents (max {settings.max_upload_mb} MB each) and ask questions "
+                "about their content. Note: the knowledge base is shared by everyone using this app.")
+    try:
+        docs = get_doc_service()
+        chunk_count = docs.document_count()
+    except Exception as e:
+        st.error(f"Document store unavailable: {e}")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**1. Upload Documents**")
+        uploaded_files = st.file_uploader(
+            "Choose PDF or TXT files",
+            type=list(settings.allowed_upload_types),
+            accept_multiple_files=True,
+            key="rag_uploader",
+            label_visibility="collapsed",
+        )
+        if uploaded_files and st.button("Process Documents", key="process_docs"):
+            with st.spinner("Processing documents..."):
+                try:
+                    ingest = docs.ingest([(f.name, f.getvalue()) for f in uploaded_files])
+                except Exception as e:
+                    st.error(f"Error: {describe_error(e)}")
+                    ingest = None
+            if ingest:
+                for msg in ingest.rejected:
+                    st.warning(msg)
+                if ingest.chunks:
+                    st.success(f"Indexed {ingest.files} file(s) into {ingest.chunks} chunks. "
+                               "Re-uploading a file replaces its chunks instead of duplicating them.")
+                    chunk_count = docs.document_count()
+                elif not ingest.rejected:
+                    st.error("No text could be extracted from the uploaded files.")
+        if chunk_count:
+            st.success(f"{chunk_count} chunks in the knowledge base")
+        else:
+            st.info("The knowledge base is empty.")
+
+    with col2:
+        st.markdown("**2. Ask Questions**")
+        query = st.text_area("Your question:", placeholder="What is this document about?",
+                             key="rag_query", label_visibility="collapsed")
+        if st.button("Ask", key="ask_rag") and query:
+            if not chunk_count:
+                st.warning("No documents loaded. Please upload files first.")
+                return
+            with st.spinner("Searching for answer..."):
+                try:
+                    answer = docs.answer(query)
+                except Exception as e:
+                    st.error(f"Error: {describe_error(e)}")
+                    return
+            st.markdown(f'<div class="resp-box"><span class="resp-label">Answer</span>{esc(answer.text)}</div>',
+                        unsafe_allow_html=True)
+            if answer.sources:
+                with st.expander("View source documents"):
+                    for i, (source, excerpt) in enumerate(answer.sources, 1):
+                        st.markdown(f"**Source {i} ({esc(source)}):** {esc(excerpt)}…")
+
+
+result: BuildResult = st.session_state.build_result
+
+if result is not None:
+    st.markdown("---")
+    st.markdown('<div class="slabel">Build results</div>', unsafe_allow_html=True)
+    if result.succeeded:
+        st.success(f"Build {result.build_id} succeeded in {result.duration_s:.0f}s — agent deployed.")
+    else:
+        message = result.error.message if result.error else "unknown error"
+        st.error(f"Build {result.build_id} failed at **{result.failed_stage}**: {message}")
+
+    agent_type = result.plan.plan.agent_type if result.plan and result.plan.ok else None
+    tab_specs = [("Plan", render_plan), ("Simulation", render_simulation), ("Code", render_code),
+                 ("Tests", render_tests), ("Deploy", render_deploy)]
+    if agent_type == "rag":
+        tab_specs.append(("Document Q&A", render_doc_qa))
+
+    for tab, (_, render) in zip(st.tabs([name for name, _ in tab_specs]), tab_specs):
+        with tab:
+            render(result)
+
+    st.markdown("---")
+    with st.expander("Build record (JSON)"):
+        st.json(result.model_dump(mode="json"))
+
+elif not build_button:
     # ─── WELCOME / EMPTY STATE ───
     st.markdown("""
     <div class="welcome-wrap">
@@ -1091,9 +987,26 @@ else:
         <div class="feat-pills">
             <div class="feat-pill"><span>What-if<br>Simulation</span></div>
             <div class="feat-pill"><span>Self<br>Correction</span></div>
-            <div class="feat-pill"><span>Pattern<br>Learning</span></div>
-            <div class="feat-pill"><span>Auto<br>Testing</span></div>
-            <div class="feat-pill"><span>One-click<br>Deploy</span></div>
+            <div class="feat-pill"><span>Build<br>Cache</span></div>
+            <div class="feat-pill"><span>Gated<br>Testing</span></div>
+            <div class="feat-pill"><span>Versioned<br>Deploy</span></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# SIDEBAR STATS (rendered last so they include this run's build)
+# ─────────────────────────────────────────────
+with stats_slot:
+    try:
+        stats = get_build_service().stats()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Builds",    stats.total)
+            st.metric("Failed",    stats.failed)
+        with c2:
+            st.metric("Deployed",  stats.succeeded)
+            st.metric("Corrected", stats.self_corrected)
+        st.caption("Counted from saved build records")
+    except Exception as e:
+        st.caption(f"Build history unavailable: {e}")

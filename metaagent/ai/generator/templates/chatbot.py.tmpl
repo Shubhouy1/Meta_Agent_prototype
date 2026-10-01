@@ -1,0 +1,50 @@
+"""
+CHATBOT AGENT (MetaAgent template)
+Generated: $timestamp
+Method: $method
+"""
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+AGENT_REQUEST = $request_literal
+MODEL = $model_literal
+SYSTEM_PROMPT = "You are a helpful assistant built for this purpose: " + AGENT_REQUEST
+
+
+def _text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
+    return str(content)
+
+
+class Agent:
+    """Conversational agent backed by Google Gemini with short in-memory history."""
+
+    def __init__(self, max_turns: int = 10):
+        self.llm = ChatGoogleGenerativeAI(model=MODEL, temperature=0.3)
+        self.history = []
+        self.max_turns = max_turns
+
+    def run(self, user_input: str) -> str:
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + self.history + [HumanMessage(content=user_input)]
+        try:
+            reply = _text(self.llm.invoke(messages).content)
+        except Exception as e:
+            return f"Error: the model could not respond ({type(e).__name__}: {e})"
+        self.history += [HumanMessage(content=user_input), AIMessage(content=reply)]
+        self.history = self.history[-self.max_turns * 2:]
+        return reply
+
+
+if __name__ == "__main__":
+    agent = Agent()
+    print("Chatbot ready. Type 'exit' to quit.")
+    while True:
+        user_input = input("\nYou: ")
+        if user_input.strip().lower() in ("exit", "quit"):
+            print("Goodbye!")
+            break
+        print(f"Bot: {agent.run(user_input)}")
