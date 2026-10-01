@@ -15,6 +15,8 @@ RAW_429 = ("Error calling model 'gemini-2.5-flash' (RESOURCE_EXHAUSTED): 429 RES
     ("400 API key not valid. Please pass a valid API key. [reason: API_KEY_INVALID]", "API key was rejected"),
     ("403 PERMISSION_DENIED", "denied the request"),
     ("504 DEADLINE_EXCEEDED", "timed out"),
+    ("Error calling model 'gemini-2.5-pro' (NOT_FOUND): 404 NOT_FOUND. {'error': {'code': 404, "
+     "'message': 'This model models/gemini-2.5-pro is no longer available to new users.'}}", "not available"),
 ])
 def test_describe_error_summarises_provider_errors(raw, expected):
     summary = describe_error(RuntimeError(raw))
@@ -24,6 +26,11 @@ def test_describe_error_summarises_provider_errors(raw, expected):
 
 def test_describe_error_keeps_unknown_errors_short():
     assert len(describe_error(RuntimeError("x" * 5000))) <= 300
+
+
+def test_describe_error_strips_unknown_provider_payloads():
+    summary = describe_error(RuntimeError("Error calling model (WEIRD): 418 WEIRD. {'error': {'code': 418}}"))
+    assert summary == "Error calling model (WEIRD): 418 WEIRD."
 
 
 @pytest.mark.parametrize("output,is_error", [

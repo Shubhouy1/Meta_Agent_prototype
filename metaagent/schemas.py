@@ -165,13 +165,18 @@ class DeploymentResult(StageResult):
 
 BuildStage = Literal["input", "planning", "tool_selection", "generation", "testing", "deployment"]
 
+# queued/running are set by callers that run builds asynchronously (e.g. an
+# API job queue); run_build() itself always returns succeeded or failed.
+BuildStatus = Literal["queued", "running", "succeeded", "failed"]
+TERMINAL_STATUSES = ("succeeded", "failed")
+
 
 class BuildResult(BaseModel):
     build_id: str
     request: str
     model: Optional[str] = None
     constraints: Constraints = Field(default_factory=Constraints)
-    status: Literal["succeeded", "failed"] = "failed"
+    status: BuildStatus = "failed"
     failed_stage: Optional[BuildStage] = None
     error: Optional[StageError] = None
     plan: Optional[PlanResult] = None
@@ -187,13 +192,27 @@ class BuildResult(BaseModel):
         return self.status == "succeeded"
 
     @property
+    def finished(self) -> bool:
+        return self.status in TERMINAL_STATUSES
+
+    @property
     def deployed(self) -> bool:
         return self.deployment is not None and self.deployment.ok
+
+
+BuildEventType = Literal[
+    "started", "completed", "failed", "skipped", "info",
+    "cache_hit",        # generation: a cached generation is being re-tested
+    "attempt_failed",   # testing: one generation attempt failed its tests
+    "self_correction",  # generation: retrying with the previous errors as feedback
+    "fallback",         # generation: LLM attempts exhausted, using the template
+]
 
 
 class BuildEvent(BaseModel):
     """Progress notification emitted by the pipeline (UI-agnostic)."""
     build_id: str
     stage: BuildStage
-    event: Literal["started", "completed", "failed", "skipped", "info"]
+    event: BuildEventType
     message: str = ""
+    attempt: Optional[int] = None

@@ -15,12 +15,12 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _env_str(name: str, default: str) -> str:
+def env_str(name: str, default: str) -> str:
     value = os.getenv(name)
     return value.strip() if value and value.strip() else default
 
 
-def _env_int(name: str, default: int) -> int:
+def env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     try:
         return int(value) if value else default
@@ -28,7 +28,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_float(name: str, default: float) -> float:
+def env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     try:
         return float(value) if value else default
@@ -36,7 +36,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _env_list(name: str, default: tuple) -> tuple:
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_list(name: str, default: tuple) -> tuple:
     value = os.getenv(name)
     if not value:
         return default
@@ -111,25 +118,25 @@ def load_settings() -> Settings:
     """Build Settings from the environment (and .env, if present)."""
     load_dotenv(PROJECT_ROOT / ".env")
     defaults = Settings()
-    available = _env_list("METAAGENT_AVAILABLE_MODELS", defaults.available_models)
-    default_model = _env_str("METAAGENT_DEFAULT_MODEL", defaults.default_model)
+    available = env_list("METAAGENT_AVAILABLE_MODELS", defaults.available_models)
+    default_model = env_str("METAAGENT_DEFAULT_MODEL", defaults.default_model)
     if default_model not in available:
         available = (default_model,) + available
     return Settings(
         default_model=default_model,
         available_models=available,
-        embedding_model=_env_str("METAAGENT_EMBEDDING_MODEL", defaults.embedding_model),
-        agent_model=_env_str("METAAGENT_AGENT_MODEL", defaults.agent_model),
-        llm_timeout_s=_env_float("METAAGENT_LLM_TIMEOUT_S", defaults.llm_timeout_s),
-        llm_max_retries=_env_int("METAAGENT_LLM_MAX_RETRIES", defaults.llm_max_retries),
-        max_request_chars=_env_int("METAAGENT_MAX_REQUEST_CHARS", defaults.max_request_chars),
-        max_generation_attempts=_env_int("METAAGENT_MAX_GENERATION_ATTEMPTS", defaults.max_generation_attempts),
-        test_run_timeout_s=_env_float("METAAGENT_TEST_RUN_TIMEOUT_S", defaults.test_run_timeout_s),
-        live_run_timeout_s=_env_float("METAAGENT_LIVE_RUN_TIMEOUT_S", defaults.live_run_timeout_s),
-        max_llm_calls_per_run=_env_int("METAAGENT_MAX_LLM_CALLS_PER_RUN", defaults.max_llm_calls_per_run),
-        max_upload_mb=_env_int("METAAGENT_MAX_UPLOAD_MB", defaults.max_upload_mb),
-        rag_top_k=_env_int("METAAGENT_RAG_TOP_K", defaults.rag_top_k),
-        data_dir=Path(_env_str("METAAGENT_DATA_DIR", str(defaults.data_dir))),
+        embedding_model=env_str("METAAGENT_EMBEDDING_MODEL", defaults.embedding_model),
+        agent_model=env_str("METAAGENT_AGENT_MODEL", defaults.agent_model),
+        llm_timeout_s=env_float("METAAGENT_LLM_TIMEOUT_S", defaults.llm_timeout_s),
+        llm_max_retries=env_int("METAAGENT_LLM_MAX_RETRIES", defaults.llm_max_retries),
+        max_request_chars=env_int("METAAGENT_MAX_REQUEST_CHARS", defaults.max_request_chars),
+        max_generation_attempts=env_int("METAAGENT_MAX_GENERATION_ATTEMPTS", defaults.max_generation_attempts),
+        test_run_timeout_s=env_float("METAAGENT_TEST_RUN_TIMEOUT_S", defaults.test_run_timeout_s),
+        live_run_timeout_s=env_float("METAAGENT_LIVE_RUN_TIMEOUT_S", defaults.live_run_timeout_s),
+        max_llm_calls_per_run=env_int("METAAGENT_MAX_LLM_CALLS_PER_RUN", defaults.max_llm_calls_per_run),
+        max_upload_mb=env_int("METAAGENT_MAX_UPLOAD_MB", defaults.max_upload_mb),
+        rag_top_k=env_int("METAAGENT_RAG_TOP_K", defaults.rag_top_k),
+        data_dir=Path(env_str("METAAGENT_DATA_DIR", str(defaults.data_dir))),
     )
 
 

@@ -122,15 +122,9 @@ def test_input_validation(settings):
 
 
 def test_build_service_persists_history(settings):
-    from metaagent.builds import service as service_module
-
-    service = BuildService(settings)
-    original = service_module.run_build
-    service_module.run_build = lambda *a, **k: original(*a, llm=FakeLLM(plan=CHATBOT_PLAN, code=[fenced(GOOD_AGENT)]), **k)
-    try:
-        result = service.start_build(REQUEST, Constraints(), "gemini-2.5-flash")
-    finally:
-        service_module.run_build = original
+    service = BuildService(settings, llm=FakeLLM(plan=CHATBOT_PLAN, code=[fenced(GOOD_AGENT)]))
+    result = service.start_build(REQUEST, Constraints(), "gemini-2.5-flash", build_id="fixed-build-id")
+    assert result.build_id == "fixed-build-id"
     assert service.store.get(result.build_id).build_id == result.build_id
     stats = service.stats()
     assert stats.total == 1 and stats.succeeded == 1
