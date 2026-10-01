@@ -56,9 +56,16 @@ def describe_error(error: Any) -> str:
         return "Gemini denied the request (HTTP 403). Check that the API key may use this model."
     if "DefaultCredentialsError" in text or "GOOGLE_API_KEY" in text:
         return "No Gemini credentials found. Set GOOGLE_API_KEY in .env."
+    if "NOT_FOUND" in text or " 404" in text:
+        return ("The requested Gemini model is not available for this API key (HTTP 404). "
+                "Choose another model or update METAAGENT_AVAILABLE_MODELS.")
     if "DEADLINE_EXCEEDED" in text or "timed out" in text.lower() or "Timeout" in type(error).__name__:
         return "The Gemini request timed out."
     first_line = text.strip().splitlines()[0] if text.strip() else type(error).__name__
+    # Never pass a raw provider payload ({'error': {...}}) through to users.
+    for marker in (" {'error'", ' {"error"', " {'"):
+        if marker in first_line:
+            first_line = first_line.split(marker, 1)[0].rstrip(" .:") + "."
     return first_line[:300]
 
 

@@ -1,14 +1,18 @@
-"""Build history persisted as one JSON file per build under data/builds/.
+"""Build history persistence.
 
-Deliberately simple: no database until the backend phase needs one. The
-store only reads and writes records; it contains no business logic.
+`BuildStore` is the interface the engine depends on. Implementations:
+  * JsonBuildStore (here): one JSON file per build under data/builds/. Used by
+    the Streamlit app and the CLI; no database required.
+  * SqlBuildStore (backend/app/db): SQLite via SQLModel, used by the API.
+
+Stores only read and write records; they contain no business logic.
 """
 
 import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Protocol, runtime_checkable
 
 from metaagent.schemas import BuildResult
 
@@ -24,15 +28,35 @@ class BuildStats:
     self_corrected: int
 
 
-class BuildStore:
+@runtime_checkable
+class BuildStore(Protocol):
+    def save(self, result: BuildResult) -> None: ...
+
+    def get(self, build_id: str) -> Optional[BuildResult]: ...
+
+    def list(self, limit: int = 50) -> List[BuildResult]: ...
+
+    def stats(self) -> BuildStats: ...
+
+
+def compute_stats(builds: List[BuildResult]) -> BuildStats:
+    return BuildStats(
+        total=len(builds),
+        succeeded=sum(1 for b in builds if b.status == "succeeded"),
+        failed=sum(1 for b in builds if b.status == "failed"),
+        from_cache=sum(1 for b in builds if b.generation and b.generation.method == "cache"),
+        self_corrected=sum(1 for b in builds if b.generation and b.generation.corrections > 0),
+    )
+
+
+class JsonBuildStore:
     def __init__(self, builds_dir: Path):
         self.builds_dir = Path(builds_dir)
 
-    def save(self, result: BuildResult) -> Path:
+    def save(self, result: BuildResult) -> None:
         self.builds_dir.mkdir(parents=True, exist_ok=True)
         path = self.builds_dir / f"{result.build_id}.json"
         path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-        return path
 
     def get(self, build_id: str) -> Optional[BuildResult]:
         path = self.builds_dir / f"{build_id}.json"
@@ -52,11 +76,4 @@ class BuildStore:
         return results
 
     def stats(self) -> BuildStats:
-        builds = self.list(limit=10_000)
-        return BuildStats(
-            total=len(builds),
-            succeeded=sum(1 for b in builds if b.succeeded),
-            failed=sum(1 for b in builds if not b.succeeded),
-            from_cache=sum(1 for b in builds if b.generation and b.generation.method == "cache"),
-            self_corrected=sum(1 for b in builds if b.generation and b.generation.corrections > 0),
-        )
+        return compute_stats(self.list(limit=10_000))

@@ -47,12 +47,13 @@ class _Build:
         self.on_event = on_event
         self.started = time.perf_counter()
 
-    def emit(self, stage: BuildStage, event: str, message: str = "") -> None:
+    def emit(self, stage: BuildStage, event: str, message: str = "", attempt: Optional[int] = None) -> None:
         level = logging.WARNING if event == "failed" else logging.INFO
         log_event(logger, f"stage_{event}", level=level, stage=stage, message=message)
         if self.on_event:
             try:
-                self.on_event(BuildEvent(build_id=self.result.build_id, stage=stage, event=event, message=message))
+                self.on_event(BuildEvent(build_id=self.result.build_id, stage=stage, event=event,
+                                         message=message, attempt=attempt))
             except Exception as e:  # a broken UI callback must never break the build
                 logger.warning("on_event callback failed: %s", e)
 
@@ -152,6 +153,7 @@ def _run_stages(build: _Build, request: str, constraints: Constraints, model: Op
     # Cache hit: reuse only if it still passes the same tests.
     cached = cache.get(cache_key) if cache else None
     if cached:
+        build.emit("generation", "cache_hit", "found a cached generation; re-testing it")
         build.emit("testing", "started", "re-testing cached code")
         candidate = finalize(cached["code"], "cache", cached.get("model"), gen_started)
         cached_test = tester.run_tests(candidate.code)
@@ -166,16 +168,23 @@ def _run_stages(build: _Build, request: str, constraints: Constraints, model: Op
     for attempt in range(1, settings.max_generation_attempts + 1):
         if test is not None and test.passed:
             break
-        build.emit("generation", "info", f"LLM attempt {attempt}/{settings.max_generation_attempts}")
+        if errors:
+            build.emit("generation", "self_correction",
+                       f"LLM attempt {attempt}/{settings.max_generation_attempts} with feedback from "
+                       f"{len(errors)} failed attempt(s)", attempt=attempt)
+        else:
+            build.emit("generation", "info", f"LLM attempt {attempt}/{settings.max_generation_attempts}",
+                       attempt=attempt)
         candidate = generator.generate_llm(plan, selection, request, previous_errors=errors or None)
         if not candidate.ok:
             errors.append(candidate.error.message)
             attempts.append(GenerationAttempt(attempt=attempt, method="llm", passed=False,
                                               error=candidate.error.message))
+            build.emit("generation", "attempt_failed", candidate.error.message, attempt=attempt)
             if candidate.error.type == "LLMError":
                 break  # the model is unreachable; retrying the prompt won't help
             continue
-        build.emit("testing", "started", f"testing LLM attempt {attempt}")
+        build.emit("testing", "started", f"testing LLM attempt {attempt}", attempt=attempt)
         attempt_test = tester.run_tests(candidate.code)
         attempts.append(GenerationAttempt(attempt=attempt, method="llm", passed=attempt_test.passed,
                                           error=None if attempt_test.passed else attempt_test.error.message))
@@ -185,10 +194,11 @@ def _run_stages(build: _Build, request: str, constraints: Constraints, model: Op
                 cache.put(cache_key, candidate.code, model)
             break
         errors.append(attempt_test.error.message)
-        build.emit("testing", "info", f"attempt {attempt} failed: {attempt_test.error.message}")
+        build.emit("testing", "attempt_failed", f"attempt {attempt} failed: {attempt_test.error.message}",
+                   attempt=attempt)
 
     if test is None or not test.passed:
-        build.emit("generation", "info", "LLM attempts exhausted; using template fallback")
+        build.emit("generation", "fallback", "LLM attempts exhausted; using template fallback")
         candidate = generator.generate_template(plan, selection, request)
         if candidate.ok:
             build.emit("testing", "started", "testing template")
@@ -229,7 +239,7 @@ def _run_stages(build: _Build, request: str, constraints: Constraints, model: Op
     result.deployment = deployment
     if not deployment.ok:
         return build.fail("deployment", deployment.error)
-    build.emit("deployment", "completed", deployment.deployed_file)
+    build.emit("deployment", "completed", f"deployment {deployment.deployment_id} is ready")
 
     result.status = "succeeded"
     return build.finish()
