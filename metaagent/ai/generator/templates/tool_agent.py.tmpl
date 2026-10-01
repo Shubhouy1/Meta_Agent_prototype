@@ -1,0 +1,66 @@
+"""
+TOOL AGENT (MetaAgent template)
+Generated: $timestamp
+Method: $method
+"""
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+AGENT_REQUEST = $request_literal
+MODEL = $model_literal
+
+$tool_code
+
+
+def _text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
+    return str(content)
+
+
+class Agent:
+    """Routes each request to a tool by simple intent rules; falls back to Gemini."""
+
+    def __init__(self):
+        self.tools = {
+$tool_entries
+        }
+        self.memory = $memory_init
+        self.llm = ChatGoogleGenerativeAI(model=MODEL, temperature=0.3)
+
+    def _detect_intent(self, text: str) -> str:
+        low = text.lower()
+        if "calculator" in self.tools and any(ch.isdigit() for ch in low) and any(op in low for op in "+-*/"):
+            return "calculator"
+        if "retriever" in self.tools and any(w in low for w in ("document", "pdf", "file")):
+            return "retriever"
+        if "search" in self.tools and any(w in low for w in ("search", "find", "look up", "what is", "who is")):
+            return "search"
+        return "chat"
+
+    def run(self, user_input: str) -> str:
+        intent = self._detect_intent(user_input)
+        if intent in self.tools:
+            response = self.tools[intent](user_input)
+        else:
+            context = self.memory.get_context() if self.memory else ""
+            prompt = f"Conversation so far:\n{context}\n\nUser: {user_input}" if context else user_input
+            try:
+                response = _text(self.llm.invoke(prompt).content)
+            except Exception as e:
+                response = f"Error: the model could not respond ({type(e).__name__}: {e})"
+        if self.memory:
+            self.memory.store(user_input, response)
+        return response
+
+
+if __name__ == "__main__":
+    agent = Agent()
+    print(f"Tool agent ready. Tools: {list(agent.tools)}. Type 'exit' to quit.")
+    while True:
+        user_input = input("\nYou: ")
+        if user_input.strip().lower() == "exit":
+            break
+        print(f"Agent: {agent.run(user_input)}")

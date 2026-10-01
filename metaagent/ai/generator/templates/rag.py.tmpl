@@ -1,0 +1,131 @@
+"""
+RAG AGENT with document upload (MetaAgent template)
+Generated: $timestamp
+Method: $method
+
+Run the upload UI with:  streamlit run <this file>
+"""
+
+import hashlib
+import os
+import tempfile
+
+from langchain_chroma import Chroma
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+AGENT_REQUEST = $request_literal
+MODEL = $model_literal
+EMBEDDING_MODEL = $embedding_model_literal
+CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_db")
+
+ANSWER_PROMPT = (
+    "Answer the question using only the context between the <context> tags. "
+    "If the context does not contain the answer, say you don't know.\n\n"
+    "<context>\n{context}\n</context>\n\nQuestion: {question}\nAnswer:"
+)
+
+
+def _text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
+    return str(content)
+
+
+class Agent:
+    """Answers questions from documents stored in a Chroma vector store."""
+
+    def __init__(self):
+        self.embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
+        self.llm = ChatGoogleGenerativeAI(model=MODEL, temperature=0.3)
+        self.vectorstore = None
+        if os.path.isdir(CHROMA_DIR):
+            self.vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=self.embeddings)
+
+    def add_documents(self, uploaded_files) -> int:
+        from langchain_community.document_loaders import PyPDFLoader, TextLoader
+
+        chunks, ids = [], []
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        for uploaded_file in uploaded_files:
+            data = uploaded_file.getvalue()
+            digest = hashlib.sha256(data).hexdigest()
+            suffix = "." + uploaded_file.name.rsplit(".", 1)[-1].lower()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+            try:
+                loader = PyPDFLoader(tmp_path) if suffix == ".pdf" else TextLoader(tmp_path, encoding="utf-8")
+                docs = loader.load()
+            except Exception as e:
+                print(f"Error loading {uploaded_file.name}: {e}")
+                continue
+            finally:
+                os.unlink(tmp_path)
+            for doc in docs:
+                doc.metadata["source"] = uploaded_file.name
+            for index, chunk in enumerate(splitter.split_documents(docs)):
+                chunks.append(chunk)
+                ids.append(f"{digest}:{index}")
+
+        if not chunks:
+            return 0
+        if self.vectorstore is None:
+            self.vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=self.embeddings)
+        # Deterministic ids make re-uploading the same file an upsert, not a duplicate.
+        self.vectorstore.add_documents(chunks, ids=ids)
+        return len(chunks)
+
+    def run(self, query: str) -> str:
+        if self.vectorstore is None:
+            return "No documents loaded. Please upload PDF or TXT files first."
+        try:
+            docs = self.vectorstore.similarity_search(query, k=3)
+            if not docs:
+                return f"No relevant information found for: {query}"
+            context = "\n\n".join(d.page_content for d in docs)
+            response = self.llm.invoke(ANSWER_PROMPT.format(context=context, question=query))
+            return _text(response.content)
+        except Exception as e:
+            return f"Error: {type(e).__name__}: {e}"
+
+
+def run_ui():
+    import streamlit as st
+
+    st.set_page_config(page_title="RAG Agent", layout="wide")
+    st.title("Document Q&A Agent")
+    st.markdown("Upload PDF or TXT documents and ask questions about their content")
+
+    if "rag_agent" not in st.session_state:
+        st.session_state.rag_agent = Agent()
+    agent = st.session_state.rag_agent
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("1. Upload Documents")
+        uploaded_files = st.file_uploader("Choose PDF or TXT files", type=["pdf", "txt"],
+                                          accept_multiple_files=True)
+        if uploaded_files and st.button("Process Documents", type="primary"):
+            with st.spinner("Processing documents..."):
+                count = agent.add_documents(uploaded_files)
+            if count:
+                st.success(f"Processed {len(uploaded_files)} files into {count} chunks")
+            else:
+                st.error("No documents could be processed")
+        if agent.vectorstore is not None:
+            st.info("Documents are loaded and ready for questions")
+
+    with col2:
+        st.subheader("2. Ask Questions")
+        query = st.text_area("Enter your question:", placeholder="What is this document about?")
+        if st.button("Ask", type="primary") and query:
+            with st.spinner("Searching for answer..."):
+                st.markdown("### Answer")
+                st.write(agent.run(query))
+
+
+if __name__ == "__main__":
+    run_ui()

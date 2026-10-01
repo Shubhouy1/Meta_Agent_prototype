@@ -1,0 +1,16 @@
+# Runtime dependencies, pinned to the versions MetaAgent was verified with.
+# Install into a virtual environment:  python -m pip install -r requirements.txt
+streamlit==1.57.0
+pydantic==2.13.2
+python-dotenv==1.2.2
+langchain-core==1.3.2
+langchain-google-genai==4.2.2
+langchain-chroma==1.1.0
+chromadb==1.5.8
+langchain-community==0.4.1
+langchain-text-splitters==1.1.2
+pypdf==6.10.2
+
+# Optional, only used by generated agents that select these tools:
+#   duckduckgo-search   (search: duckduckgo)
+#   tavily-python       (search: tavily, needs TAVILY_API_KEY)
